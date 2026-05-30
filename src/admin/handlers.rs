@@ -13,12 +13,14 @@ use super::{
         AddCredentialRequest, AddProxyRequest, AssignProxyRequest, BatchAddProxyRequest,
         ClientKeyItem, ClientKeysResponse, CompleteSocialLoginRequest, CreateClientKeyRequest,
         CreateClientKeyResponse, GlobalProxyResponse, SetAccountThrottleConfigRequest,
-        SetDisabledRequest, SetGlobalProxyRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
+        SetDisabledRequest, SetGlobalProxyRequest, SetLoadBalancingModeRequest,
+        SetLogGovernanceConfigRequest, SetPriorityRequest,
         SetUpdateConfigRequest, StartIdcLoginRequest, StartSocialLoginRequest, SuccessResponse,
         UpdateAdminKeyRequest, UpdateClientKeyRequest, UpdateCredentialRequest,
         UpdateRefreshTokenRequest,
     },
     usage_stats::Range,
+    trace_db::TraceQuery,
 };
 
 // Path 元组提取：(credential_id, session_id)
@@ -380,6 +382,24 @@ pub async fn set_account_throttle_config(
     Json(payload): Json<SetAccountThrottleConfigRequest>,
 ) -> impl IntoResponse {
     match state.service.set_account_throttle_config(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/config/log-governance
+/// 获取日志治理配置（trace 开关 / trace 保留 / usage 保留）
+pub async fn get_log_governance_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_log_governance_config())
+}
+
+/// PUT /api/admin/config/log-governance
+/// 更新日志治理配置（运行时生效 + 持久化 config.json）
+pub async fn set_log_governance_config(
+    State(state): State<AdminState>,
+    Json(payload): Json<SetLogGovernanceConfigRequest>,
+) -> impl IntoResponse {
+    match state.service.set_log_governance_config(payload) {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
@@ -901,4 +921,84 @@ pub async fn stats_by_credential(
         })
         .collect();
     Json(enriched)
+}
+
+/// GET /api/admin/traces
+/// 查询请求链路追踪记录（含每跳明细）。
+/// query 参数：status / errorType / credentialId / model / onlyFailed / limit / offset
+/// 返回：{ records: [...], total: N }
+pub async fn list_traces(
+    State(state): State<AdminState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let query = TraceQuery {
+        status: params.get("status").filter(|s| !s.is_empty()).cloned(),
+        error_type: params.get("errorType").filter(|s| !s.is_empty()).cloned(),
+        credential_id: params.get("credentialId").and_then(|s| s.parse::<u64>().ok()),
+        model: params.get("model").filter(|s| !s.is_empty()).cloned(),
+        only_failed: params
+            .get("onlyFailed")
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false),
+        limit: params
+            .get("limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(crate::admin::trace_db::DEFAULT_QUERY_LIMIT)
+            .min(1000),
+        offset: params
+            .get("offset")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0),
+    };
+    let (records, total) = state.trace_store.query_paged(&query);
+
+    // 附加 credential email 方便前端展示（与 stats_by_credential 一致）
+    let snapshot = state.service.get_all_credentials();
+    let email_map: std::collections::HashMap<u64, Option<String>> = snapshot
+        .credentials
+        .iter()
+        .map(|c| (c.id, c.email.clone()))
+        .collect();
+
+    let enriched: Vec<serde_json::Value> = records
+        .into_iter()
+        .map(|r| {
+            let final_email = email_map.get(&r.final_credential_id).cloned().flatten();
+            // attempts 里每跳也附 email
+            let attempts: Vec<serde_json::Value> = r
+                .attempts
+                .iter()
+                .map(|a| {
+                    let email = email_map.get(&a.credential_id).cloned().flatten();
+                    serde_json::json!({
+                        "attempt": a.attempt,
+                        "credentialId": a.credential_id,
+                        "email": email,
+                        "endpoint": a.endpoint,
+                        "httpStatus": a.http_status,
+                        "outcome": a.outcome,
+                        "errorSnippet": a.error_snippet,
+                        "durationMs": a.duration_ms,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "traceId": r.trace_id,
+                "ts": r.ts,
+                "keyId": r.key_id,
+                "model": r.model,
+                "isStream": r.is_stream,
+                "finalStatus": r.final_status,
+                "finalCredentialId": r.final_credential_id,
+                "finalEmail": final_email,
+                "errorType": r.error_type,
+                "errorMessage": r.error_message,
+                "totalAttempts": r.total_attempts,
+                "durationMs": r.duration_ms,
+                "interruptedAfterBytes": r.interrupted_after_bytes,
+                "attempts": attempts,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "records": enriched, "total": total }))
 }

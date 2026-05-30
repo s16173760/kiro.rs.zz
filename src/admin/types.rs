@@ -311,6 +311,32 @@ pub struct SetAccountThrottleConfigRequest {
     pub cooldown_secs: Option<u64>,
 }
 
+/// 日志治理配置响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogGovernanceConfigResponse {
+    /// 是否启用请求链路追踪写入
+    pub trace_enabled: bool,
+    /// trace 记录保留天数
+    pub trace_retention_days: u32,
+    /// 用量日志保留天数
+    pub usage_log_retention_days: u32,
+}
+
+/// 更新日志治理配置（字段缺省表示不修改）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLogGovernanceConfigRequest {
+    #[serde(default)]
+    pub trace_enabled: Option<bool>,
+    /// trace 保留天数，1..=365
+    #[serde(default)]
+    pub trace_retention_days: Option<u32>,
+    /// 用量日志保留天数，1..=365
+    #[serde(default)]
+    pub usage_log_retention_days: Option<u32>,
+}
+
 // ============ 代理池 ============
 
 /// 代理池条目

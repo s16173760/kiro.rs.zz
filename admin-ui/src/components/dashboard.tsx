@@ -83,9 +83,23 @@ import {
   useLoadBalancingMode,
   useSetLoadBalancingMode,
   useResetAllSuccessCount,
+  useSetPriority,
 } from "@/hooks/use-credentials";
 import { useUpdateCheck } from "@/hooks/use-update-check";
 import { useRectSelect } from "@/hooks/use-rect-select";
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  closestCenter,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  rectSortingStrategy,
+} from "@dnd-kit/sortable";
 import {
   getCredentialBalance,
   forceRefreshToken,
@@ -168,17 +182,80 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } =
     useSetLoadBalancingMode();
   const resetAllSuccess = useResetAllSuccessCount();
+  const setPriority = useSetPriority();
   const { data: updateCheck } = useUpdateCheck();
 
   const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
-  const currentCredentials =
-    data?.credentials.slice(startIndex, endIndex) || [];
+  const serverPageCreds = data?.credentials.slice(startIndex, endIndex) || [];
+  // 拖拽排序的本地乐观顺序：仅当 id 集合与当前页一致时生效，否则回落到服务端顺序，
+  // 避免翻页 / 数据变更后顺序错乱。
+  const [pageOrder, setPageOrder] = useState<number[] | null>(null);
+  const currentCredentials = (() => {
+    if (!pageOrder) return serverPageCreds;
+    const serverIds = new Set(serverPageCreds.map((c) => c.id));
+    const orderIds = new Set(pageOrder);
+    if (
+      serverIds.size !== orderIds.size ||
+      ![...serverIds].every((id) => orderIds.has(id))
+    ) {
+      return serverPageCreds;
+    }
+    const byId = new Map(serverPageCreds.map((c) => [c.id, c]));
+    return pageOrder.map((id) => byId.get(id)!).filter(Boolean);
+  })();
   const currentPageIds = currentCredentials.map((c) => c.id);
   const currentPageAllSelected =
     currentPageIds.length > 0 &&
     currentPageIds.every((id) => selectedIds.has(id));
+
+  // 翻页时清掉本地排序覆盖，回到服务端顺序
+  useEffect(() => {
+    setPageOrder(null);
+  }, [currentPage]);
+
+  const dragSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const ids = currentCredentials.map((c) => c.id);
+    const oldIndex = ids.indexOf(Number(active.id));
+    const newIndex = ids.indexOf(Number(over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+
+    const newOrder = arrayMove(ids, oldIndex, newIndex);
+    setPageOrder(newOrder);
+
+    // 按新视觉顺序赋连续递增的 priority（全局位置 = startIndex + 页内索引）。
+    // 不依赖原有 priority 值域：即使原值全为默认 0 / 相同，也能保证数字更新、排序持久化；
+    // 跨页也不冲突（第 1 页 0..11、第 2 页 12..23）。只对实际变化的卡片发请求。
+    const prevPriority = new Map(
+      currentCredentials.map((c) => [c.id, c.priority]),
+    );
+    const updates = newOrder
+      .map((id, i) => ({ id, priority: startIndex + i }))
+      .filter((u) => prevPriority.get(u.id) !== u.priority);
+    if (updates.length === 0) return;
+
+    Promise.all(
+      updates.map((u) =>
+        setPriority.mutateAsync({ id: u.id, priority: u.priority }),
+      ),
+    )
+      .then(() => {
+        toast.success("优先级顺序已更新");
+        queryClient.invalidateQueries({ queryKey: ["credentials"] });
+      })
+      .catch((err) => {
+        toast.error("更新优先级失败: " + (err as Error).message);
+        setPageOrder(null);
+      });
+  };
+
   const gridRef = useRef<HTMLElement | null>(null);
   const rectSelection = useRectSelect({
     containerRef: gridRef,
@@ -1262,21 +1339,36 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
           </Card>
         ) : (
           <>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 select-none">
-              {currentCredentials.map((credential) => (
-                <CredentialCard
-                  key={credential.id}
-                  credential={credential}
-                  selected={selectedIds.has(credential.id)}
-                  onToggleSelect={() => toggleSelect(credential.id)}
-                  balance={
-                    balanceMap.get(credential.id) || credential.balance || null
-                  }
-                  loadingBalance={loadingBalanceIds.has(credential.id)}
-                  onRefreshBalance={() => handleRefreshBalance(credential.id)}
-                />
-              ))}
-            </div>
+            <DndContext
+              sensors={dragSensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+            >
+              <SortableContext
+                items={currentPageIds}
+                strategy={rectSortingStrategy}
+              >
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 select-none">
+                  {currentCredentials.map((credential) => (
+                    <CredentialCard
+                      key={credential.id}
+                      credential={credential}
+                      selected={selectedIds.has(credential.id)}
+                      onToggleSelect={() => toggleSelect(credential.id)}
+                      balance={
+                        balanceMap.get(credential.id) ||
+                        credential.balance ||
+                        null
+                      }
+                      loadingBalance={loadingBalanceIds.has(credential.id)}
+                      onRefreshBalance={() =>
+                        handleRefreshBalance(credential.id)
+                      }
+                    />
+                  ))}
+                </div>
+              </SortableContext>
+            </DndContext>
 
             {totalPages > 1 && (
               <div className="mt-8 flex items-center justify-center gap-2">

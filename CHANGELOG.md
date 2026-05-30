@@ -6,6 +6,55 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-05-30
+
+主题：新增**请求链路追踪（Trace）+ 「请求日志」排查页面**。此前 `/v1/messages` 的失败链路几乎不可观测——provider 重试循环里每跳失败（402 禁用 / 429 风控冷却 / 401/403 鉴权 / 5xx / 网络错误）只有 `tracing::warn!` 日志，handler 最终只写一条 `UsageRecord` 且失败时 `credential_id=0`、status 仅 success/error，无错误类型、无重试次数、无上游错误体；流式中途断开也只记 `error`。这一版把每个外部请求的完整重试链路（含每跳命中凭据、HTTP 状态码、失败分类、上游错误体片段、耗时）落到 SQLite，并提供可筛选、可展开链路的前端页面，专门用于排查"中断"类问题。配套加日志治理（trace 开关 / 保留天数可配且运行时可改），以及一批凭据卡片交互改进（拖拽排序优先级、失败日志详情弹框、卡片等高对齐等）。
+
+### ✨ 新功能 — 请求链路追踪（尝试级）
+
+- **SQLite 持久化**：新增 `src/admin/trace_db.rs`（rusqlite + bundled，自带 SQLite 源码静态编译，无系统库依赖）。`traces.db` 与凭据文件同目录，WAL 模式。两张表：`traces`（请求级汇总）+ `trace_attempts`（每跳明细，外键 trace_id）。一个外部请求 = 1 条 trace + N 条 attempt。
+- **每跳结构化记录**：provider 重试循环（`src/kiro/provider.rs`）每一跳结束时通过 `TraceSink` 上报：第几次尝试、命中凭据 id、endpoint、HTTP 状态码（网络层失败为 null）、失败分类、上游错误体片段（截断 2KB）、单跳耗时。失败分类复用现有判别：`quota_exhausted` / `account_throttled` / `auth_failed` / `transient` / `network_error` / `bad_request` / `unknown` / `success`。
+- **请求级汇总**：handler 层 `RequestTracer`（`src/anthropic/handlers.rs`）累积 attempts，请求结束时 finalize：`final_status`（success / error / interrupted）、`final_credential_id`、顶层 `error_type`（提升自最后一跳分类，便于筛选）、`error_message`、总尝试次数、端到端耗时。
+- **流式中断检测**：流式 / 缓冲流式两路的 SSE unfold 都累计已发送字节数，上游中途断流时标记 `final_status=interrupted` + `interrupted_after_bytes`，区分"完整失败"与"半截中断"。
+- **保留期可配**：后台任务（复用现有 cleanup tokio 循环）每天 `DELETE` 掉超过保留天数的 traces + 关联 attempts，保留天数默认 7 天、运行时可改（见下方"日志治理"）。`traces.db` 打开失败不致命——降级为内存库，trace 不可用但服务正常。
+- **零侵入**：`KiroCallResult` 签名不变，attempt 走 `TraceSink` 旁路上报；未启用 trace（开关关闭或 store 为 None）时所有路径零开销。MCP（WebSearch）路径本期不接 trace。
+
+### ✨ 新功能 — Admin API + 「请求日志」页面
+
+- **`GET /api/admin/traces`**：query 参数 `status` / `errorType` / `credentialId` / `model` / `onlyFailed` / `limit`（默认 200，上限 1000），动态拼参数化 WHERE + `ORDER BY ts_epoch DESC LIMIT`，返回含每跳明细的链路；附带 credential email 反查（与 `stats_by_credential` 一致）。
+- **前端独立「请求日志」Tab**（`admin-ui/src/components/trace-log-page.tsx`）：与概览 / 凭据管理 / 客户端 Key 并列。表格列：时间、模型、状态徽章（成功绿 / 失败红 / 中断橙）、最终凭据（email）、错误类型、重试次数、耗时。顶部筛选：状态下拉 + 错误类型下拉 + "只看失败"开关 + 刷新。点击行展开完整重试链路时间线，每跳显示凭据 / endpoint / HTTP 状态 / outcome 徽章 / 耗时，失败跳展示上游错误体片段（等宽可折叠）。
+- **新增前端文件**：`api/traces.ts`、`hooks/use-traces.ts`（复刻 stats 的 30s 刷新 + keepPreviousData）、类型 `TraceAttempt` / `TraceRecord` / `TraceQuery`。
+
+### ✨ 新功能 — 日志治理（可配置 + 运行时可改）
+
+- **三个 config 字段**（`src/model/config.rs`，camelCase）：`traceEnabled`（默认 true）/ `traceRetentionDays`（默认 7）/ `usageLogRetentionDays`（默认 31）。启动时读入，分别初始化 `TraceStore` 与 `UsageRecorder`。`config.example.json` 已补充示例。
+- **运行时可改 + 持久化**：保留期与 trace 开关改为 `AtomicBool` / `AtomicU64`（参照 `account_throttle` 的运行时可变模式）。`GET/PUT /api/admin/config/log-governance` 改完立即生效并回写 `config.json`，无需重启；保留天数校验 `1..=365`，写盘失败时运行时值仍生效并 warn。关闭 `traceEnabled` 后 `TraceStore::insert` 直接短路，不再写新链路（历史记录仍可查）。
+- **前端治理面板**：「请求日志」页筛选栏新增"治理设置"下拉（参照顶栏风控配置）——trace 启用开关 + trace 保留天数输入 + usage 日志保留天数输入，保存即调 `PUT /config/log-governance`。
+
+### ✨ 新功能 — 凭据卡片交互改进
+
+- **拖拽排序优先级**（`@dnd-kit`）：每张凭据卡片操作区新增 `⋮⋮` 拖拽手柄，按住手柄即可在当前页内拖动重排。松手后按新视觉顺序赋连续递增的 `priority`（全局位置 = 页起始索引 + 页内序号），只对实际变化的卡片发 `set_priority`，乐观更新 + 失败回滚。手柄带 `data-no-rect-select`，与既有矩形框选 / 点击选中完全隔离；拖拽中关掉 Card 的 `transition-all` 与 hover 位移，保证"跟手"。**移除原优先级 ↑/↓ 按钮**，操作区恢复单行。仅当前页内排序，翻页清除本地顺序覆盖。
+- **失败日志详情弹框**：卡片"失败次数"改为可点击，弹框（`credential-failures-dialog.tsx`）展示该凭据最近 50 条失败链路（复用 `GET /traces?credentialId=X&onlyFailed=true`，懒加载——弹框未打开不查询）。每条含时间、错误类型徽章、HTTP 状态、错误消息、上游错误体片段。补足了卡面"失败次数"计数器看不到的瞬态 / 网络失败历史（该计数器是连续失败计数、成功即清零、瞬态错误故意不计入，语义不变）。
+- **可交互数值统一标识**：优先级（`Pencil` 编辑）/ 失败次数（`ScrollText` 看日志）/ 成功次数（`RotateCcw` 重置）三个可点击数值统一加图标 + `hover:bg-accent` 悬停反馈 + `cursor-pointer`，此前无可点击标识。
+- **启用凭据后自动刷新余额**：在卡片开关把凭据从禁用切到启用且成功后，自动触发一次该卡片的余额查询。
+- **卡片等高对齐**：Card 改 `flex h-full flex-col` 填满 grid 行高、CardContent `flex-1`、操作区 `mt-auto` 固定贴底；余额面板加 `min-h-[150px]`，未查询 / 查询中 / 已查询三态高度一致。同行卡片整体对齐。
+- **徽章合并减少换行**：标题下的配置元信息徽章（endpoint / Profile ARN）合并为单个 `endpoint · ARN` 徽章；状态类徽章（订阅 / 活跃 / 已禁用 / 已超额 / 冷却）保留独立以维持颜色语义。
+
+### 📦 依赖 / 构建
+
+- **新增 Rust 依赖**：`rusqlite = { version = "0.32", features = ["bundled"] }`。bundled 自带 SQLite C 源码静态编译，跨平台一致、无需系统库。
+- **新增前端依赖**：`@dnd-kit/core` / `@dnd-kit/sortable` / `@dnd-kit/utilities`（凭据卡片拖拽排序，vendor chunk 约 +42KB / gzip +14KB）。
+- **`.gitignore` / `.dockerignore`** 新增 `traces.db` 及 WAL 边车文件（`traces.db-shm` / `traces.db-wal`，运行时产物不入库）。
+- **测试覆盖**：247 通过（trace_db 新增 5：insert/query roundtrip、disabled 短路、only_failed/status/model 筛选、cleanup 按保留期、错误体截断）。
+
+### 📦 升级指南
+
+1. **`docker compose pull && docker compose up -d`** 即可。`traces.db` 首次请求时自动创建于凭据文件同目录，无需手动初始化。
+2. **排查中断**：登录管理面板 → 顶栏「请求日志」Tab → 用状态 / 错误类型筛选或开"只看失败" → 点击任一行展开看完整重试链路（哪个凭据、第几跳、因为什么失败、上游原始错误体）。
+3. **日志治理**：「请求日志」页"治理设置"下拉可随时开关 trace、调整 trace / usage 日志保留天数，改完立即生效并写回 `config.json`；也可直接在 `config.json` 配 `traceEnabled` / `traceRetentionDays` / `usageLogRetentionDays`（缺省即用默认 true / 7 / 31）。
+4. **凭据排序与失败排查**：「凭据管理」Tab 拖动卡片 `⋮⋮` 手柄即可在当前页内调整优先级（实时持久化）；点击卡片"失败次数"可看该凭据的失败日志详情（依赖 trace 开启）。
+5. **无破坏性变更**：trace 与现有 usage_log / 概览统计完全独立，不影响既有功能；升级无需清理任何状态文件。
+
 ## [0.5.2] - 2026-05-29
 
 主题：在 0.5.1（prompt cache 重构 + Credit 全链路 + 仪表盘改造）基础上加入**账号级风控识别与冷却失败转移**——上游 Kiro/Q-Developer 在风控触发时返回带 `suspicious-activity` body 的 429，与"高负载 429"完全不同；旧版本一刀切当成 transient 重试，导致单账号被反复打到。同时修复 thinking 模式跨轮 replay 的客户端校验失败。前端配套加风控冷却倒计时徽章、单卡刷新余额按钮、整页刷余额按钮提级、趋势图 range 切换动效等若干细节。

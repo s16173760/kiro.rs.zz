@@ -290,6 +290,26 @@ export async function setAccountThrottleConfig(
   return data
 }
 
+export interface LogGovernanceConfig {
+  traceEnabled: boolean
+  traceRetentionDays: number
+  usageLogRetentionDays: number
+}
+
+// 获取日志治理配置
+export async function getLogGovernanceConfig(): Promise<LogGovernanceConfig> {
+  const { data } = await api.get<LogGovernanceConfig>('/config/log-governance')
+  return data
+}
+
+// 更新日志治理配置
+export async function setLogGovernanceConfig(
+  patch: Partial<LogGovernanceConfig>,
+): Promise<LogGovernanceConfig> {
+  const { data } = await api.put<LogGovernanceConfig>('/config/log-governance', patch)
+  return data
+}
+
 // 发起 IdC 设备授权登录
 export async function startIdcLogin(
   req: StartIdcLoginRequest

@@ -15,6 +15,8 @@ import {
   setLoadBalancingMode,
   getAccountThrottleConfig,
   setAccountThrottleConfig,
+  getLogGovernanceConfig,
+  setLogGovernanceConfig,
   resetSuccessCount,
   resetAllSuccessCount,
 } from '@/api/credentials'
@@ -198,6 +200,25 @@ export function useSetAccountThrottleConfig() {
     mutationFn: setAccountThrottleConfig,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accountThrottleConfig'] })
+    },
+  })
+}
+
+// 获取日志治理配置
+export function useLogGovernanceConfig() {
+  return useQuery({
+    queryKey: ['logGovernanceConfig'],
+    queryFn: getLogGovernanceConfig,
+  })
+}
+
+// 更新日志治理配置
+export function useSetLogGovernanceConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: setLogGovernanceConfig,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['logGovernanceConfig'] })
     },
   })
 }

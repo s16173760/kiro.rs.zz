@@ -12,16 +12,17 @@ use super::{
         complete_social_relogin, create_client_key, delete_client_key, delete_credential,
         delete_proxy, disable_quota_exceeded, enable_overage_all, export_kam_credentials,
         force_refresh_token, get_account_throttle_config, get_all_credentials,
-        get_credential_balance, get_global_proxy, get_load_balancing_mode, get_proxy_pool,
-        get_update_config, list_client_keys, poll_idc_login, poll_idc_relogin, poll_social_login,
+        get_credential_balance, get_global_proxy, get_load_balancing_mode, get_log_governance_config,
+        get_proxy_pool, get_update_config, list_client_keys, list_traces, poll_idc_login,
+        poll_idc_relogin, poll_social_login,
         poll_social_relogin, pull_update_image, reset_all_success_count, reset_client_key_stats,
         reset_failure_count, reset_success_count, rollback_image_update,
         set_account_throttle_config, set_client_key_disabled, set_credential_disabled,
         set_credential_overage, set_credential_priority, set_global_proxy,
-        set_load_balancing_mode, set_proxy_enabled, set_update_config, start_idc_login,
-        start_idc_relogin, start_social_login, start_social_relogin, stats_by_credential,
-        stats_by_model, stats_overview, stats_timeseries, update_admin_key, update_api_key,
-        update_client_key, update_credential, update_refresh_token,
+        set_load_balancing_mode, set_log_governance_config, set_proxy_enabled, set_update_config,
+        start_idc_login, start_idc_relogin, start_social_login, start_social_relogin,
+        stats_by_credential, stats_by_model, stats_overview, stats_timeseries, update_admin_key,
+        update_api_key, update_client_key, update_credential, update_refresh_token,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -89,6 +90,10 @@ pub fn create_admin_router(state: AdminState) -> Router {
             get(get_account_throttle_config).put(set_account_throttle_config),
         )
         .route(
+            "/config/log-governance",
+            get(get_log_governance_config).put(set_log_governance_config),
+        )
+        .route(
             "/config/global-proxy",
             get(get_global_proxy).put(set_global_proxy),
         )
@@ -142,6 +147,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/stats/timeseries", get(stats_timeseries))
         .route("/stats/by-model", get(stats_by_model))
         .route("/stats/by-credential", get(stats_by_credential))
+        .route("/traces", get(list_traces))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

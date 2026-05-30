@@ -2,8 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import {
   RefreshCw,
-  ChevronUp,
-  ChevronDown,
+  GripVertical,
   Trash2,
   Loader2,
   Pencil,
@@ -13,6 +12,7 @@ import {
   Zap,
   ZapOff,
   Clock,
+  ScrollText,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -50,9 +50,12 @@ import {
 } from "@/hooks/use-credentials";
 import { setCredentialOverage } from "@/api/credentials";
 import { useQueryClient } from "@tanstack/react-query";
+import { useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { EditCredentialDialog } from "@/components/edit-credential-dialog";
 import { UpdateTokenDialog } from "@/components/update-token-dialog";
 import { ReloginDialog } from "@/components/relogin-dialog";
+import { CredentialFailuresDialog } from "@/components/credential-failures-dialog";
 
 interface CredentialCardProps {
   credential: CredentialStatusItem;
@@ -193,6 +196,7 @@ export function CredentialCard({
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showUpdateTokenDialog, setShowUpdateTokenDialog] = useState(false);
   const [showReloginDialog, setShowReloginDialog] = useState(false);
+  const [showFailuresDialog, setShowFailuresDialog] = useState(false);
 
   const setDisabled = useSetDisabled();
   const setPriority = useSetPriority();
@@ -202,6 +206,24 @@ export function CredentialCard({
   const resetSuccess = useResetSuccessCount();
   const clearThrottle = useClearThrottle();
   const queryClient = useQueryClient();
+
+  // 拖拽排序：手柄触发，整卡随拖动位移
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: credential.id });
+  const dragStyle: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    // 拖拽中关掉过渡，避免 Card 基类的 transition-all 把每帧 transform 动画化导致"不跟手"；
+    // 非拖拽态保留 dnd-kit 的归位过渡。
+    transition: isDragging ? "none" : transition,
+    zIndex: isDragging ? 20 : undefined,
+  };
 
   // 后端冷却剩余秒数会在 30s 拉取间隔之间过时，本地用 setInterval 自然递减以让倒计时连续。
   const [throttleRemaining, setThrottleRemaining] = useState<number>(
@@ -243,10 +265,15 @@ export function CredentialCard({
   };
 
   const handleToggleDisabled = () => {
+    // 当前为禁用态 → 这次操作是“启用”，启用成功后顺带刷新一次余额
+    const willEnable = credential.disabled;
     setDisabled.mutate(
       { id: credential.id, disabled: !credential.disabled },
       {
-        onSuccess: (res) => toast.success(res.message),
+        onSuccess: (res) => {
+          toast.success(res.message);
+          if (willEnable) onRefreshBalance();
+        },
         onError: (err) => toast.error("操作失败: " + (err as Error).message),
       },
     );
@@ -324,8 +351,14 @@ export function CredentialCard({
   return (
     <>
       <Card
+        ref={setNodeRef}
+        style={dragStyle}
         data-credential-id={credential.id}
-        className={`group hover:-translate-y-0.5 hover:shadow-apple-lg ${
+        className={`group flex h-full flex-col ${
+          isDragging
+            ? "shadow-apple-lg opacity-80"
+            : "hover:-translate-y-0.5 hover:shadow-apple-lg"
+        } ${
           credential.isCurrent ? "ring-2 ring-primary/60 shadow-apple-lg" : ""
         } ${
           // 未禁用但已超额：琥珀色提醒边
@@ -398,11 +431,23 @@ export function CredentialCard({
                 {credential.authMethod && (
                   <Badge variant="secondary">{authLabel}</Badge>
                 )}
-                {credential.endpoint && (
-                  <Badge variant="outline">{credential.endpoint}</Badge>
-                )}
-                {credential.hasProfileArn && (
-                  <Badge variant="outline">Profile ARN</Badge>
+                {/* 配置元信息合并为单个徽章，减少换行：endpoint · ARN */}
+                {(credential.endpoint || credential.hasProfileArn) && (
+                  <Badge
+                    variant="outline"
+                    title={
+                      credential.hasProfileArn
+                        ? "endpoint / 已配置 Profile ARN"
+                        : "endpoint"
+                    }
+                  >
+                    {[
+                      credential.endpoint,
+                      credential.hasProfileArn ? "ARN" : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </Badge>
                 )}
               </div>
             </div>
@@ -415,7 +460,7 @@ export function CredentialCard({
           </div>
         </CardHeader>
 
-        <CardContent className="space-y-4">
+        <CardContent className="flex flex-1 flex-col space-y-4">
           {/* 信息行 */}
           <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[13px]">
             <div className="flex items-center justify-between gap-2">
@@ -454,21 +499,32 @@ export function CredentialCard({
                 ) : (
                   <button
                     type="button"
-                    className="font-medium tabular-nums hover:text-primary transition-colors"
+                    className="inline-flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 font-medium tabular-nums transition-colors hover:bg-accent hover:text-primary"
                     onClick={() => setEditingPriority(true)}
-                    title="点击编辑"
+                    title="点击编辑优先级"
                   >
                     {credential.priority}
+                    <Pencil className="h-3 w-3 opacity-70" />
                   </button>
                 )}
               </dd>
             </div>
             <div className="flex items-center justify-between gap-2">
               <dt className="text-muted-foreground">失败次数</dt>
-              <dd
-                className={`tabular-nums font-medium ${credential.failureCount > 0 ? "text-destructive" : ""}`}
-              >
-                {credential.failureCount}
+              <dd>
+                <button
+                  type="button"
+                  onClick={() => setShowFailuresDialog(true)}
+                  className={`inline-flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 font-medium tabular-nums transition-colors hover:bg-accent hover:text-primary ${
+                    credential.failureCount > 0
+                      ? "text-destructive"
+                      : "text-muted-foreground"
+                  }`}
+                  title="点击查看失败日志详情"
+                >
+                  {credential.failureCount}
+                  <ScrollText className="h-3.5 w-3.5 opacity-70" />
+                </button>
               </dd>
             </div>
             <div className="flex items-center justify-between gap-2">
@@ -485,10 +541,11 @@ export function CredentialCard({
                 <button
                   type="button"
                   onClick={handleResetSuccess}
-                  className="tabular-nums font-medium hover:text-primary transition-colors"
-                  title="点击重置"
+                  className="inline-flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 font-medium tabular-nums transition-colors hover:bg-accent hover:text-primary"
+                  title="点击重置成功次数"
                 >
                   {credential.successCount}
+                  <RotateCcw className="h-3 w-3 opacity-70" />
                 </button>
               </dd>
             </div>
@@ -518,14 +575,14 @@ export function CredentialCard({
 
           {/* 余额面板 */}
           <div
-            className={`rounded-xl border p-4 transition-colors ${
+            className={`flex min-h-[150px] flex-col rounded-xl border p-4 transition-colors ${
               isQuotaExceeded || disabledByQuota
                 ? "border-amber-500/40 bg-amber-50/60 dark:bg-amber-500/[0.06]"
                 : "border-border/60 bg-secondary/40"
             }`}
           >
             {loadingBalance ? (
-              <div className="flex items-center justify-center gap-2 py-3 text-sm text-muted-foreground">
+              <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 正在查询余额…
               </div>
@@ -575,52 +632,26 @@ export function CredentialCard({
                 </div>
               </div>
             ) : (
-              <div className="py-2 text-[13px] text-muted-foreground">
+              <div className="flex flex-1 items-center justify-center text-center text-[13px] text-muted-foreground">
                 余额未查询，点击顶部"刷新当前页余额"即可加载。
               </div>
             )}
           </div>
 
           {/* 操作区 */}
-          <div className="flex items-center justify-between gap-2 border-t border-border/50 pt-3">
+          <div className="mt-auto flex items-center justify-between gap-2 border-t border-border/50 pt-3">
             <div className="flex items-center gap-1">
               <Button
+                ref={setActivatorNodeRef}
                 size="icon"
                 variant="ghost"
-                onClick={() => {
-                  const np = Math.max(0, credential.priority - 1);
-                  setPriority.mutate(
-                    { id: credential.id, priority: np },
-                    {
-                      onSuccess: (res) => toast.success(res.message),
-                      onError: (err) =>
-                        toast.error("操作失败: " + (err as Error).message),
-                    },
-                  );
-                }}
-                disabled={setPriority.isPending || credential.priority === 0}
-                title="提高优先级"
+                data-no-rect-select
+                className="cursor-grab touch-none active:cursor-grabbing"
+                title="拖拽调整优先级"
+                {...attributes}
+                {...listeners}
               >
-                <ChevronUp className="h-4 w-4" />
-              </Button>
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={() => {
-                  const np = credential.priority + 1;
-                  setPriority.mutate(
-                    { id: credential.id, priority: np },
-                    {
-                      onSuccess: (res) => toast.success(res.message),
-                      onError: (err) =>
-                        toast.error("操作失败: " + (err as Error).message),
-                    },
-                  );
-                }}
-                disabled={setPriority.isPending}
-                title="降低优先级"
-              >
-                <ChevronDown className="h-4 w-4" />
+                <GripVertical className="h-4 w-4 text-muted-foreground" />
               </Button>
               <span className="mx-1 h-5 w-px bg-border/70" />
               <Button
@@ -643,7 +674,7 @@ export function CredentialCard({
                 <RefreshCw
                   className={`h-3.5 w-3.5 ${forceRefresh.isPending ? "animate-spin" : ""}`}
                 />
-                刷新 Token
+                <span className="hidden sm:inline">刷新 Token</span>
               </Button>
               <Button
                 size="sm"
@@ -655,7 +686,7 @@ export function CredentialCard({
                 <RefreshCw
                   className={`h-3.5 w-3.5 ${loadingBalance ? "animate-spin" : ""}`}
                 />
-                刷新余额
+                <span className="hidden sm:inline">刷新余额</span>
               </Button>
             </div>
 
@@ -809,6 +840,12 @@ export function CredentialCard({
         open={showReloginDialog}
         onOpenChange={setShowReloginDialog}
         credential={credential}
+      />
+      <CredentialFailuresDialog
+        open={showFailuresDialog}
+        onOpenChange={setShowFailuresDialog}
+        credentialId={credential.id}
+        email={credential.email}
       />
     </>
   );

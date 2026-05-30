@@ -368,3 +368,57 @@ export interface CredentialDistribution {
   outputTokens: number
   errors: number
 }
+
+// ============ 请求链路追踪 ============
+
+/** 单次上游尝试 */
+export interface TraceAttempt {
+  attempt: number
+  credentialId: number
+  email?: string | null
+  endpoint: string
+  /** 上游 HTTP 状态码；null = 网络层失败 */
+  httpStatus: number | null
+  /** success / quota_exhausted / account_throttled / auth_failed / transient / network_error / bad_request / unknown */
+  outcome: string
+  /** 上游错误体片段（已截断） */
+  errorSnippet: string | null
+  durationMs: number
+}
+
+/** 一个外部请求的完整链路 */
+export interface TraceRecord {
+  traceId: string
+  ts: string
+  keyId: number
+  model: string
+  isStream: boolean
+  /** success / error / interrupted */
+  finalStatus: string
+  finalCredentialId: number
+  finalEmail?: string | null
+  errorType: string | null
+  errorMessage: string | null
+  totalAttempts: number
+  durationMs: number
+  /** 流式中断时已发送字节数 */
+  interruptedAfterBytes: number | null
+  attempts: TraceAttempt[]
+}
+
+/** 链路查询参数 */
+export interface TraceQuery {
+  status?: string
+  errorType?: string
+  credentialId?: number
+  model?: string
+  onlyFailed?: boolean
+  limit?: number
+  offset?: number
+}
+
+/** 分页响应 */
+export interface TracePage {
+  records: TraceRecord[]
+  total: number
+}
