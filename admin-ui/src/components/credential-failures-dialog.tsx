@@ -7,7 +7,7 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { useTraces } from "@/hooks/use-traces";
-import type { TraceRecord } from "@/types/api";
+import type { TraceAttempt, TraceRecord } from "@/types/api";
 
 interface CredentialFailuresDialogProps {
   open: boolean;
@@ -58,6 +58,12 @@ export function CredentialFailuresDialog({
     open,
   );
   const records = data?.records ?? [];
+  // 摊平：同一请求里该凭据失败了几跳就显示几条（按时间倒序）
+  const failedHops = records.flatMap((rec) =>
+    rec.attempts
+      .filter((a) => a.credentialId === credentialId && a.outcome !== "success")
+      .map((a) => ({ rec, attempt: a })),
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -65,7 +71,7 @@ export function CredentialFailuresDialog({
         <DialogHeader>
           <DialogTitle>失败日志详情</DialogTitle>
           <DialogDescription>
-            {email || `凭据 #${credentialId}`} 最近的失败请求（最多 50 条）
+            {email || `凭据 #${credentialId}`} 最近的失败记录（最多 50 条请求）
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-[60vh] space-y-2 overflow-y-auto">
@@ -73,13 +79,17 @@ export function CredentialFailuresDialog({
             <div className="py-6 text-center text-sm text-muted-foreground">
               加载中…
             </div>
-          ) : records.length === 0 ? (
+          ) : failedHops.length === 0 ? (
             <div className="py-6 text-center text-sm text-muted-foreground">
               该凭据暂无失败记录（trace 关闭或近期无失败）。
             </div>
           ) : (
-            records.map((rec) => (
-              <FailureRow key={rec.traceId} rec={rec} credentialId={credentialId} />
+            failedHops.map(({ rec, attempt }) => (
+              <FailureRow
+                key={`${rec.traceId}-${attempt.attempt}`}
+                rec={rec}
+                attempt={attempt}
+              />
             ))
           )}
         </div>
@@ -88,21 +98,15 @@ export function CredentialFailuresDialog({
   );
 }
 
-/** 单条失败链路：聚焦"该凭据失败的那一跳"展示（即便整条 trace 最终成功） */
+/** 单跳失败：展示该凭据某次失败的 outcome / HTTP / 错误体 */
 function FailureRow({
   rec,
-  credentialId,
+  attempt,
 }: {
   rec: TraceRecord;
-  credentialId: number;
+  attempt: TraceAttempt;
 }) {
-  // 该凭据失败的那一跳（按弹框聚焦的凭据，而非 trace 最终凭据）
-  const failedHop =
-    rec.attempts.find(
-      (a) => a.credentialId === credentialId && a.outcome !== "success",
-    ) || rec.attempts.find((a) => a.credentialId === credentialId);
-  const style = outcomeStyle(failedHop?.outcome ?? rec.errorType);
-  const attempt = failedHop;
+  const style = outcomeStyle(attempt.outcome);
   // 整条 trace 后续是否成功了（用别的凭据救回）
   const traceRecovered = rec.finalStatus === "success";
   return (
@@ -112,9 +116,14 @@ function FailureRow({
           {formatTime(rec.ts)}
         </span>
         <Badge variant={style.variant}>{style.label}</Badge>
-        {attempt?.httpStatus != null && (
+        {attempt.httpStatus != null && (
           <span className="font-mono text-muted-foreground">
             HTTP {attempt.httpStatus}
+          </span>
+        )}
+        {rec.totalAttempts > 1 && (
+          <span className="text-[12px] text-muted-foreground">
+            第 {attempt.attempt + 1}/{rec.totalAttempts} 跳
           </span>
         )}
         {traceRecovered && (
@@ -124,15 +133,10 @@ function FailureRow({
           <Badge variant="warning">中断</Badge>
         )}
         <span className="ml-auto text-[12px] text-muted-foreground">
-          尝试 {rec.totalAttempts} 次 · {rec.model}
+          {rec.model}
         </span>
       </div>
-      {rec.errorMessage && (
-        <div className="mt-1.5 text-[12px] text-destructive">
-          {rec.errorMessage}
-        </div>
-      )}
-      {attempt?.errorSnippet && (
+      {attempt.errorSnippet && (
         <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-md bg-background/60 p-2 font-mono text-[11px] text-muted-foreground">
           {attempt.errorSnippet}
         </pre>
